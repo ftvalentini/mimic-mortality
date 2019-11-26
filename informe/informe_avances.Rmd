@@ -1,0 +1,80 @@
+---
+title: "Predicción de Sepsis en Terapia Intensiva"
+subtitle: "Avances del Trabajo de Especialización\n\nMaestría en Explotación de Datos (UBA)"
+author:
+- "Francisco Valentini"
+date: "Julio de 2019"
+lang: es
+fontsize: 12pt 
+output:
+  bookdown::pdf_document2:
+    fig_caption: yes
+    toc: no
+    number_sections: false
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F
+                      , fig.align='center')
+```
+
+El objetivo de este documento es dar cuenta de (a) los avances realizados hasta el momento y (b) las tareas pendientes para finalizar el trabajo de especialización.
+
+## Set de datos
+
+Usé los registros administrativos y fisiológicos de pacientes que pasaron por la unidad de terapia intensiva del Beth Israel Deaconess Medical Center de Boston durante 2001-2012, disponibles en la [base de datos MIMIC (Medical Information Mart for Intensive Care) desarrollada por el MIT](https://mimic.physionet.org/about/mimic/).
+
+## Objetivo
+
+El objetivo general del trabajo es generar un predictor de sepsis usando la información de las primeras 24 hs de internación cada paciente. 
+
+## Metodología
+
+El objetivo general implica el cumplimiento de las siguientes tareas específicas:
+
+### Preprocesamiento
+
+Etapa realizada. Conservé únicamente las mediciones fisiólogicas de cada paciente registradas en las primeras 24 horas de internación. Para cada paciente consideré únicamente el primer ingreso al hospital y a la unidad de terapia intensivamente, a la vez que eliminé pacientes con transferencias entre unidades del hospital. 
+
+Para cada observación remanente crée una variable binaria de sepsis -- variable respuesta del modelo a ajustar -- indicando la ocurrencia de sepsis en algún momento de la internación posterior a las primeras 24 horas, usando la definición de [Martin](http://dx.doi.org/10.1056/NEJMoa022139). Además generé dos indicadores estándar de sepsis que también usan la información de las primeras 24 horas: el *Sequential Organ Failure Assessment* (SOFA) y el *Simplified Acute Physiology Score II* (SAPS II) a partir de los [códigos provistos por el MIT](https://github.com/MIT-LCP/mimic-code/tree/master/concepts/severityscores).
+
+Eliminé las variables con un porcentaje de faltantes mayor al 50%, y para completar los valores faltantes restantes apliqué la técnica de *median polish*.
+
+### Feature Engineering
+
+A partir del dataset reducido generé las siguientes variables resumen del primer día para cada medición fisiológica: mínimo, media, máximo y coeficiente de tendencia con respecto al tiempo. El resultado son aproximadamente 80 features. 
+
+Como resultado de esta etapa y la anterior obtuve un set de datos de 12116 registros y 90 variables.
+
+### Identificación de outliers
+
+Ya realicé esta etapa. Identifiqué casos atípicos con (a) [un método estadístico basado en la curtosis propuesto por Peña y Prieto](https://www.tandfonline.com/doi/abs/10.1198/106186007X181236), y (b) el entrenamiento de un autoencoder (método basado en redes neuronales). En este paso no se usa la variable respuesta de sepsis. El output de esta etapa consiste en dos indicadores de "outlyingness" (uno para la técnica (a) y otro para (b)). Los resultados pueden observarse en la Figura \ref{fig:outliers}, en los que se compara cada indicador en escala logarítmica.
+
+```{r outliers, out.width='60%', fig.cap="Indicadores de atipicidad: método de Peña y Prieto vs. Autoencoder"}
+knitr::include_graphics(c(
+  "output/plots/outliers_scatter.png"
+))
+```
+
+Como se observa, no hay una relación positiva entre ambos indicadores. Como pregunta a resolver a futuro me planteo si existe una forma posible de evaluar la bondad de cada método en este set de datos.
+
+### Ajuste de GAM
+
+Esta tarea se encuentra pendiente. El objetivo es generar un predictor de sepsis usando un Modelo Aditivo Generalizado usando los aproximadamente 80 features de mediciones fisiológicas generados, así como también las variable sociodemográficas. La elección del modelo se debe a que permite captar no linealidaes y alcanzar mejor precisión en la clasificación que modelos más simples, a la vez que se conserva la interpretabilidad que habilita la aditividad del modelo.
+
+En relación a esta tarea surgen la siguientes inquietudes:
+
+- El ajuste de un GAM en un contexto de alta dimensión puede ser un poco problemático por la presencia de multicolinealidad y concurvity, a pesar de la disponiblidad de muchas observaciones. Por eso considero que será necesario implementar alguna técnica de feature selection -- el [método de *overlap grouped-lasso penalties* sugerido por Chouldechova y Hastie](https://web.stanford.edu/~hastie/Papers/gamsel.pdf) puede ser una solución.
+
+- Sería razonable buscar una forma de detectar interacciones relevantes para incluir en el modelo, más allá de las que surgen de la comprensión del dominio de aplicación.
+
+### Validación del indicador de atipicidad y el predictor de sepsis
+
+Tarea pendiente. Esta etapa consiste en ajustar una regresión logística usando como regresores: (1) el indicador de atipicidad/outlyingess (uno de ellos, ambos, o el primer componente de PCA de ambos), (2) el predictor ajustado por GAM y (3) los scores estándar de sepsis (SOFA y SAPS II); y como variable respuesta la presencia de sepsis durante la internación.
+
+El objetivo es determinar cuánto mejoran (1) y (2) la predicción de sepsis. Asimismo este paso permitiría ver cuál de los dos indicadores de atipicidad es mejor en términos de capacidad predictiva (en el caso de usar ambos). La significatividad de las variables podría evaluarse con el procedimiento de pre-validation que presentan [Höfling y Tibshirani](http://statweb.stanford.edu/~tibs/ftp/PreValidationArticle.pdf).
+
+## Aspectos a revisar
+
+- Si llegara a ajustar el GAM con cross-validation (ya sea para evaluar la performance o para elegir algún hiperparámetro) entonces debería ejecutar el preprocesamiento (cualquier transformación que haga en los datos de entrada del modelo, como el *median polish* o la eliminación de variables según un umbral de faltantes) en la corrida de cada fold. Si no, estaría usando datos de validación para entrenar.

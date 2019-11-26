@@ -1,0 +1,331 @@
+---
+title: "Predicción de Mortalidad en Terapia Intensiva"
+subtitle: "Trabajo de Especialización\n\nMaestría en Explotación de Datos (UBA)"
+author: "Francisco Valentini^[ft.valentini@gmail.com]"
+date: "Octubre de 2019"
+lang: es
+fontsize: 12pt
+output:
+  bookdown::pdf_document2:
+    fig_caption: true
+    toc: true
+    number_sections: true
+abstract: |
+  xxxxxxxxx xxx xxxxxxxxxx xxxxxxxxxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx xxx.
+bibliography: ["biblio.bib"]
+link-citations: true
+biblio-style: apalike
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=F, warning=F, message=F, fig.align='center')
+# knitr::opts_chunk$set(fig.path = "../output/plots/")
+knitr::opts_knit$set(root.dir=normalizePath('../'))
+```
+
+```{r libfunc}
+source("functions.R")
+library(keras)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+```
+
+# Introducción
+
+*resumir cada etapa del analisis*
+*motivación de KSD y autoencoder (robusto a no linealidades) (importancia de detectar anomalías en UTI tanto para tratar como para investigación)*
+*motivación de GAM (no linealidades y aditividad para interpretar)*
+
+*El objetivo es generar un predictor de sepsis usando un Modelo Aditivo Generalizado usando los aproximadamente 80 features de mediciones fisiológicas generados, así como también las variable sociodemográficas. La elección del modelo se debe a que permite captar no linealidaes y alcanzar mejor precisión en la clasificación que modelos más simples, a la vez que se conserva la interpretabilidad que habilita la aditividad del modelo.*
+
+
+*Los GAM nos permiten ajustar una fj no lineal a cada Xj, de modo que podamos modelar automáticamente las relaciones no lineales que la regresión lineal estándar perderá. Esto significa que no necesitamos probar manualmente muchas transformaciones diferentes en cada variable individualmente.
+ Los ajustes no lineales pueden hacer predicciones más precisas
+por la respuesta Y.
+ Debido a que el modelo es aditivo, aún podemos examinar el efecto de cada Xj en Y individualmente mientras mantenemos fijas todas las demás variables. Por lo tanto, si estamos interesados en la inferencia, los GAM proporcionan un útil
+representación.*
+
+
+# Materiales y métodos
+
+## Fuentes de datos
+
+El estudio se hizo con MIMIC-III, una base de libre acceso con datos anonimizados de pacientes internados en la Unidad de Terapia Intensiva (UTI) del Beth Israel Deaconess Medical Center de Boston entre 2001 y 2012 [@mimic].
+
+MIMIC-III incluye datos demográficos, mediciones horarias de signos vitales, resultados de pruebas de laboratorio, procedimientos, medicamentos, notas de cuidadores, informes de imágenes y eventos relevantes tanto dentro como fuera del hospital, como mortalidad. Se puede acceder a una descripción del esquema completo de tablas en el [repositorio oficial del MIT Laboratory for Computational Physiology](https://mit-lcp.github.io/mimic-schema-spy/).
+
+## Algoritmos
+
+### Imputación de datos faltantes
+
+Para imputar valores numéricos faltantes durante la etapa de preprocesamiento (ver sección \@ref(prep-faltantes)) se usó el procedimiento de *median polish* de Tukey (ver @hoaglin).
+
+El valor $x_{ij}$ que toma cada registro $i$ para cada covariable $j$ se modela como un modelo lineal y aditivo
+$x_{ij} = \mu + \alpha_{i} + \beta_{j} + \varepsilon_{ij}$,
+tal que $\mu$ representa el "valor común" o efecto general del set de datos, $\alpha_{i}$ es el efecto por fila, $\beta_{j}$ es el efecto por columna y $\varepsilon_{ij}$ son fluctuaciones aleatorias.
+
+El procedimiento de *median polish* consiste en estimar $\mu$, $\alpha_{i}$ y $\beta_{j}$ iterativamente, sustrayendo las medianas por fila y columna de los datos hasta que la mediana de los residuos se acerque a cero, dado un máximo de iteraciones prefijado. En un lugar de un modelo de ANOVA para la estimación del modelo aditivo, se eligió *median polish*  por su robustez a valores atípicos.
+
+Considerando que el objetivo no es de inferencia sobre los parámetros del modelo, sino imputar valores de variables con distintas unidades de medidas, resumimos la técnica de imputación implementada con los siguientes pasos:
+
+1. Se estandarizan las columnas sustrayendo las medianas y diviendo por los desvíos absolutos medianos (MAD) de cada una, omitiendo los valores faltantes (si algún MAD equivale a cero, se sumaron pequeños desvíos en relación a la escala de la variable para computarlo).
+2. Se estiman el efecto general y los efectos por fila y columna usando *median polish* omitiendo los valores faltantes.
+3. Se imputan los valores faltantes de los datos normalizados sumando correspondientemente los los efectos estimados en el paso anterior.
+4. Se reescalan las variables a su escala original multiplcando por los MADs y sumando las medianas calculadas en el primer paso.
+
+### Detección de anomalías {#meto-anom}
+
+Para identificar casos anómalos nos proponemos generar indicadores de *outlyingness* que indiquen el grado de atipicidad o anomalía de cada observación. Los indicadores usan los predictores del set completo de internaciones ya preprocesado, sin incluir la variable respuesta del análisis supervisado. No es de interés en esta aplicación identificar puntos de corte en los indicadores que separen lo anómalo de lo no-anómalo.
+
+Para la tarea de detección de anomalías, los algoritmos descritos en esta sección se ajustan inicialmente sobre todo el set de datos y posteriormente se comparan visualmente. Sin embargo, como también es de interés analizar si el indicador ajustado con un autoencoder contribuye a la predicción de mortalidad, se entrena en segunda instancia siguiendo un criterio acorde a una tarea supervisada, que se describe en la sección \@ref(meto-stacking).
+
+#### Kurtosis plus Specific Directions (KSD)
+
+La detección de observaciones atípicas en datos multivariados puede lograrse hallando una proyección univariada de los datos que indique el grado de atipicidad o *outlyingness* de cada uno: si una observación dada tiene un valor alto en esta proyección, entonces se clasifica como outlier multivariado.
+
+De esta manera, sean $X$ la matriz de datos y $x$ una observación particular tal que $x \in R^{p}$, el problema consiste en hallar una dirección $a$ tal que $||a|| = 1$ y tal que:
+
+$$t(x) = \max_{a} \left|\frac{x'a - \hat{\mu}(a'X)}{\hat{\sigma}(a'X)}\right|$$
+
+donde $\hat{\mu}$ y $\hat{\sigma}$ son estimadores robustos de posición y dispersión, respectivamente [@maronna].
+
+El procedimiento de *Kurtosis plus Specific Directions* (KSD) propuesto por @ksd intenta hallar $a$ usando las dos siguientes observaciones:
+
+1. Una pequeña proporción de valores atípicos tiende a incrementar la curtosis de una distribución --las colas se vuelven más pesadas-- mientras que una proporción alta disminuye la curtosis --la distribución se vuelve más bimodal.
+2. Se puede aumentar la probabilidad de obtener direcciones buenas --que detecten valores atípicos-- mediante un mecanismo de muestreo estratificado.
+
+Por lo tanto, el  método KSD busca iterativamente proyecciones que maximicen y minimicen la curtosis, así como también direcciones obtenidas al azar. Sobre estas direcciones se computa $t(x)$, que se usa en el presente trabajo como indicador de anomalía o atipicidad de una estadía en la UTI. 
+
+#### Autoencoder
+
+Otro método posible para detectar anomalías consiste en ajustar un modelo que busque reconstruir las propias observaciones, de modo que aquellos casos con un error de reconstrucción alto --desvíos altos con respecto al modelo aprendido-- se puedan catalogar como *outliers*. 
+
+Para este fin usamos la arquitectura de redes neuronales conocida como *autoencoder* (AE) (ver @autoencoder1 y autoencoder2). Un AE consiste en una red neuronal con tantas neuronas como features en la capa de entrada y tantas neuronas como features en la capa de salida, cuyos pesos se ajustan para reproducir el input. 
+
+En particular, los AE llamados *undercomplete* reducen la cantidad de neuronas en las capas intermedias en relación a las capas de entrada/salida, a fin de generar una representación en baja dimensión de los datos. Las salidas de las capas intermedias funcionan como un espacio latente o *embedding* que capturan las dimensiones más importantes de la distribución multivariada de los datos. Al reconstruir los datos desde esta representación latente se obtiene una reconstrucción de cada caso en la dimensión original, libre de ruido y anomalías. Entonces, el error de reconstrucción de una observación dada, que es el error entre el punto original y su reconstrucción, se usa como un indicador de *outlyingness*.
+
+Formalmente, partiendo de una observación dada $x \in R^{p}$, el AE codifica $x$ con múltiples representaciones intermedias $x^{int} \in R^{k}$ tal que $k$ representa la cantidad de neuronas de una capa intermedia dada y tal que $k<p$. La representación de menor dimensión es luego decodificada como $\hat{x} \in R^{p}$ y se computa el score de *outlyingness* como $t(x) = Ave(x-\hat{x})^2$.
+
+La estructura del AE implementado --sin considerar la capa de input-- se describe en la Figura \@ref(fig:auto-estructura). Se usó una red *feed-forward* y *fully-connected* con cinco capas intermedias (*latent1* hasta *latent5*) tal que los datos llegan a representarse en una dimensión dos en la capa *latent3*. Todas las capas intermedias usan funciones de activación ReLU mientras que la capa de salida usa activaciones lineales. Los pesos se entrenaron mediante el algoritmo de optimización Adam.    
+
+```{r auto-estructura, out.width='90%', fig.cap="Estructura del autoencoder"}
+auto_mod = load_model_hdf5("data/working/model_autoencoder.h5",compile = FALSE)
+print_output(summary(auto_mod), cex=0.75)
+```
+
+### Predicción de mortalidad
+
+El objetivo de aprendizaje supervisado es la predicción de mortalidad durante los 7 días siguientes a la internación ($mor7$) -- el evento de mortalidad se codifica como $mor7 = 1$ y la supervivencia como $mor7 = 0$. Para este fin se ajusta un Modelo Aditivo Generalizado regularizado usando como covariables mediciones realizadas durante las primeras 24 horas de internación (ver Sección \@ref(prep-atr)). El predictor GAM es validado mediante *model stacking* en una regresión logística junto a otros predictores estándar de mortalidad y al indicador de anomalías AE, a fin de determinar la significatividad de su aporte a la predicción de *mor7*.  
+
+Para realizar ambos ejercicios los registros son separados al azar entre un set de entrenamiento (85% de los datos) y un set de test (15% de los datos). 
+
+#### Modelo Aditivo Generalizado (GAM) {#gam}
+
+Los Modelos Aditivos Generalizados (GAMs) permiten modelar relaciones no lineales entre cada covariable $x_j$ y la respuesta $Y$ ajustando funciones suaves y no lineales suave $f_j(x_{j})$ para cada covariable por separado. En esta aplicación, en la medida en que el target es binario, se ajusto un GAM de regresión logística según la expresión:
+
+$$ log\left(\frac{p(Y=1|X)}{1-p(Y=1|X)}\right) = \beta_0 + \sum_{j=1}^{p}f_{j}(x_{ij}) + \epsilon_i $$
+
+según la cual el *logodds* de *mor7* es una función no lineal y aditiva de las covariables $x_j$. Transformando las *logodds* se puede obtener el resultado del modelo como una probabilidad de mortalidad estimada.
+
+Para ajustar el modelo usamos la metodología presentada por @gamsel. La misma propone un enfoque de estimación penalizada que permite ajustar cada $f_j$ como cero, lineal o no lineal según lo sugerido por los datos. Gracias a este mecanismo de *feature selection* se pueden filtrar variables irrelevantes o redundantes automáticamente, ajustar funciones lineales cuando son una buena aproximación o capturar relaciones no lineales fuertes cuando están presentes. El parámetro que regula el grado de penalización es $\lambda$ --para $\lambda=0$ se conservan todas las covariables en el modelo, mientras que para $\lambda \to \infty$ el efecto de todos los predictores tiende a cero. Todas las covariables se estandarizan con las medias y desvíos estimados con los datos de entrenamiento antes de realizar el ajuste.  
+
+Debido al doble objetivo que perseguimos en el aprendizaje supervisado --entender el impacto de los principales factores asociados a la mortalidad (1) y optimizar la precisión en la predicción de mortalidad (2)-- ajustamos el GAM penalizado de las dos maneras siguientes:   
+
+(1) Se usa un parámetro de regularización lo suficientemente alto como para identificar y visualizar el efecto las 30 covariables más importantes, usando todos los datos de entrenamiento. Esta decisión tiene un fin puramente explicativo, dado que el $\lambda$ que optimiza la capacidad preditiva en sets de validación selecciona demasiadas variables con coeficiente no nulo, dificultando la interpretación.
+
+(2) Para optimizar la capacidad predictiva se usa el valor del parámetro $\lambda$ que optimiza el *accuracy* a la hora de predecir nuevos casos. El valor de $\lambda$ se halla mediante 10-fold Cross-Validation usando los datos de entrenamiento. La performance final del predictor (*GAMpred*) se evalúa en el set de test.
+
+#### Stacking {#meto-stacking}
+
+Esta etapa consiste en ajustar una regresión logística usando como covariables
+(1) el indicador de atipicidad AE, (2) el predictor *GAMpred* y (3) tres scores estándar de mortalidad que usan información de las primeras 24 horas de internación; y usando como variable respuesta *mor7*.
+
+El indicador AE se ajusta con los datos de entrenamiento mientras que *GAMpred* se ajusta como se indicó en la Sección \@ref(gam). En base a estos modelos ajustados se extraen las predicciones sobre el set de test que se usan como covariables en el *stacked model*. La regresión logística se ajusta con los datos de test. A partir de la evaluación de la significatividad de los coeficientes de (1) y (2) en la regresión se puede evaluar su contribución a la predicción de mortalidad.
+
+Cabe destacar que para evaluar la capacidad predictiva de los modelos (AE y *GAMpred*) correctamente sería necesario incluir en la validación todos las etapas del proceso de modelado, además de la estimación de la probabilidad: en particular, todas las decisiones de preprocesamiento de los datos descritas en la Sección \@ref(prep).
+
+## Software usado
+
+Para almacenar y preprocesar la base MIMIC-III usamos el motor de bases de datos PostgreSQL. Para todos los análisis restantes usamos el lenguaje R [@rbase], haciendo uso en particular de las librerías *tidyverse* [@rtidyverse], *gamsel* [@rgamsel] y *keras* [@rkeras].
+
+# Preprocesamiento {#prep}
+
+## Extracción de datos
+
+De MIMIC-III conservamos atributos personales y mediciones fisiólogicas de cada paciente registrados en las primeras 24 horas de internación en la UTI médica --no se consideran pacientes de otros tipos de unidades (por ejemplo, neonatal o quirúrgica). Para cada paciente consideramos únicamente el primer ingreso al hospital y a la UTI, a la vez que eliminamos pacientes con transferencias entre unidades del hospital. La variable respuesta fue construida observando el evento de mortalidad en una ventana de 7 días posteriores a las primeras 24 horas de internación.  
+
+Con la información disponible se calcularon tres indicadores estándar de severidad que también usan la información de las primeras 24 horas: el *Sequential Organ Failure Assessment* SOFA [@sofa], el *Simplified Acute Physiology Score II* SAPS II [@sapsii] y el *Oxford Acute Severity of Illness Score* OASIS [@oasis].
+
+Para generar las vistas y tablas necesarias para extraer los datos usamos el código disponible en [@mimic-code].
+
+## Generación de atributos {#prep-atr}
+
+Como resultado de la extracción de atributos obtuvimos un set de covariables medidos una o más veces durante las primeras 24 horas, que se muestran en el Cuadro \@ref(tab:tab-vars).
+
+```{r tab-vars}
+tab_vars = readr::read_csv("resources/docs/var_definitions.csv")
+knitr::kable(
+  tab_vars
+  # list(
+  #   tab_vars %>% head(nrow(.)/3)
+  #   ,tab_vars %>% slice((nrow(.)/3+1):(2*nrow(.)/3))
+  #   ,tab_vars %>% tail(nrow(.)/3)
+  # )
+  ,caption="Mediciones durante las primeras 24 horas de internación", booktabs=T) %>%
+  kable_styling(font_size=9)
+```
+
+Aquellas covariables con más de una medición durante el primer día de internación se resumieron usando estadísticos de mínimo, máximo, media y coeficiente de tendencia con respecto al tiempo.
+
+## Tratamiento de datos faltantes {#prep-faltantes}
+
+Eliminé las variables con un porcentaje de faltantes mayor al 50%, y para completar los valores faltantes restantes apliqué la técnica de *median polish*.
+
+## Tratamiento de valores atípicos
+
+```{r}
+tabla = readRDS("data/working/x_train_auto.rds") %>% 
+  rbind(readRDS("data/working/x_test_auto.rds"))
+```
+
+Durante el preprocesamiento eliminamos aquellos registros con mediciones afectadas seguramente por errores de carga -- por ejemplo, pacientes con más de 120 años, con nitrógeno ureico en sangre negativo o con producción de orina superior a los 100 litros.  
+
+Como resultado de las tareas de preprocesamiento descritas en la Sección \@ref(prep) generamos un set de datos listo para entrenar los algoritmos --previo al remuestreo-- conformado por `r ncol(tabla)` covariables y `r nrow(tabla)` registros.
+
+# Modelado y resultados
+
+## Detección de anomalías
+
+```{r}
+out_ksd = readRDS("data/working/outliers_full_ksd.rds")
+out_auto = readRDS("data/working/outliers_full_auto.rds")
+out = inner_join(out_ksd, out_auto, by="id_tot", suffix=c("_ksd","_auto"))
+```
+
+En la presente sección se presentan los resultados de aplicar los procedimientos de KSD y AE tal como se describe en la sección \@ref(meto-anom).
+
+En la Figura \@ref(fig:auto-full) se presenta el detalle de la evolución del error cuadrático medio para cada *epoch* del entrenamiento del autoencoder. El error se estabiliza aproximadamente a partir de la recorrida nº 15 por el set de datos.
+
+```{r auto-full, out.width='60%', fig.cap="Entrenamiento de autoencoder para detección de anomalías"}
+auto_fit_full = readRDS("data/working/auto_fithistory_full.rds")
+plot(auto_fit_full, metrics="loss")
+```
+
+En la Figura \@ref(fig:auto-ksd) se comparan los indicadores de *outlyingness* que se obtienen al aplicar ambas técnicas --ambos se presentan en escala logarítmica. Tanto AE como KSD tienen una distribución asimétrica --lo cual es de esperar porque se tratan de indicadores de atipicidad; la asimetría es más marcada en el caso de KSD, lo cual sugiere que se pueden catalogar menos pacientes como atípicos usando esta técnica. Por otra parte, en el diagrama de dispersión se observa que los indicadores presentan un grado de asociación no despreciable, arrojando un coeficiente de correlación de Spearman --en la escala original-- de `r cor(out$out_ksd, out$out_auto, method="spearman") %>% round(2)`.
+
+```{r auto-ksd, out.width='45%', fig.show='hold', fig.cap="Outlyingness KSD vs. autoencoder (escala logarítmica)"}
+knitr::include_graphics(c(
+  "../output/plots/outliers_scatter_logorig.png"
+  ,"../output/plots/outliers_dens_log.png"
+))
+```
+
+## Predicción de mortalidad
+
+### Modelo Aditivo Generalizado (GAM)
+
+#### Factores de riesgo 
+
+En la presente sección presentamos los resultados de entrenar un GAM persiguiendo un objetivo de inferencia --presentado como objetivo (1) en la sección \@ref(gam).
+
+El Cuadro \@ref(tab:gam-allvars) indica todas las covariables consideradas para entrenar el GAM según las transformaciones descritas en la sección \@ref(prep-atr). Por su parte, el Cuadro \@ref(tab:gam-reg) indica la cantidad de predictores identificados por el GAM con un efecto no nulo sobre la probabilidad de mortalidad para cada posible valor de $\lambda$ en el *path* de penalización. Para conservar no más de 30 de las covariables más relevantes en términos de capacidad predictiva se escoge un valor de $\lambda = 1.578$.   
+
+```{r gam-allvars}
+tab_vars = readRDS("output/tables/vars_reference.rds")
+knitr::kable(
+  list(
+    tab_vars %>% head(nrow(.)/3)
+    ,tab_vars %>% slice((nrow(.)/3+1):(2*nrow(.)/3))
+    ,tab_vars %>% tail(nrow(.)/3)
+  )
+  ,caption="Predictores incluidos en GAM", booktabs=T) %>%
+  kable_styling(font_size=8)
+```
+
+```{r gam-reg}
+gam_vars = readRDS("output/tables/gam_nonzero_lambda.rds")
+tab = gam_vars %>% arrange(NonZero) %>% group_by(NonZero) %>%
+  dplyr::filter(row_number()==1)
+knitr::kable(
+  list(
+    tab %>% head(nrow(.)/2)
+    ,tab %>% tail(nrow(.)/2)
+  )
+  ,caption="Cantidad de predictores en el regularization path del GAM", booktabs=T) %>%
+  kable_styling(font_size=8)
+```
+
+En la Figura \@ref(gam-vars) se representa visualmente el efecto *ceteris-paribus* estimado de cada covariable sobre el *log-odds* de la mortalidad --en verde se indican los efectos linales y en rojo, los no lineales. Las covariables de los ejes horizontales se presentan estandarizadas según las medias y varianzas del dataset de entrenamiento.
+
+Se identifican únicamente cuatro efectos no lineales, que corresponden al potasio mínimo (v23), la frecuencia cardíaca (v37), la tendencia en el tiempo de la presión arterial media (v50) y la temperatura corporal media (v56). Las cuatro funciones estimadas tienen el mismo patrón: para valores relativemente altos y bajos de estos atributos la probabilidad de mortalidad estimada es más alta, mientras que baja para valores intermedios.  
+
+En cuanto a la significatividad empírica del efecto, se destacan las covariables de gasto urinario (v2), presión arterial sistólica media (v40) y saturación de oxígeno capilar periférica, media (v60) y con su coeficiente de tendencia (v61), con un efecto negativo sobre la probabilidad de muerte. Por su parte, el lactato mínimo (v19), el lactato máximo (v20), el tiempo de protrombina mínimo (v27), el mínimo conteo de glóbulos blancos (v35) y el crecimiento de la temperatura corporal en el tiempo (v57) presentan un efecto positivo significativo sobre la mortalidad --a medida que toman valores más altos entre los distintos pacientes crece la probabilidad estimada de mortalidad.  
+
+```{r gam-vars, out.width='100%', fig.cap="Variables explicativas del GAM (lambda=1.578)"}
+knitr::include_graphics("../output/plots/gam_vars.png")
+```
+
+#### Predicción
+
+Para ajustar un GAM que optimice la capacidad predictiva --según el objetivo (2) planteado en la sección \@ref(gam)-- se escogió un valor del parámetro de penalización $\lambda$ tal que optimice el error de clasificación estimado por 10-fold Cross Validation. En particular, elegimos el modelo con mayor penalización ($\lambda$ más alto) tal que el error medio se encuentre a un desvío estándar del error medio mínimo --este valor se destaca en la barra vertical derecha de la Figura \@ref(fig:gam-cv). Como se observa en el eje horizontal superior, dicho valor implica un modelo que conserva 40 covariables con efectos no nulos sobre la probabilidad de muerte estimada.
+
+```{r gam-cv, out.width='70%', fig.cap="Error de clasificación de 10-fold CV según penalización del GAM"}
+knitr::include_graphics("../output/plots/gam_cv.png")
+```
+
+Para comparar la performance del modelo ajustado con los tres scores de severidad replicados --OASIS, SOFA y SAPSII-- graficamos la curva de ROC (Figura \@ref(fig:gam-roc)) y computamos el área debajo de la curva *AUC* (Cuadro \@ref(tab:gam-auc)), a la vez que comparamos la distribución de la probabilidad estimada entre sobrevivientes y fallecidos durante la primera semana (Figura \@ref(fig:gam-violin)). Los tres resultados se obtuvieron calculando los indicadores a partir de los datos de test.
+
+```{r gam-roc, out.width='60%', fig.cap="Curva de ROC: GAM y scores de severidad estándar"}
+knitr::include_graphics("../output/plots/gam_roc.png")
+```
+
+```{r gam-auc}
+tab_auc = readRDS("output/tables/gam_auroc.rds")
+tab_auc %>%
+  mutate_all(function(x) round(x*100,2)) %>%
+  setNames(c("GAM","OASIS","SAPSII","SOFA")) %>%
+  knitr::kable(caption="Área debajo de la curva ROC: GAM y scores de severidad estándar",booktabs=T) %>%
+  kable_styling(font_size=10)
+```
+
+```{r gam-violin, out.width='90%', fig.cap="Distribución de positivos y negativos: GAM y scores de severidad estándar"}
+knitr::include_graphics("../output/plots/gam_violin.png")
+```
+
+El predictor *GAMpred* desarrollado presenta una *AUC* superior a los scores estándar. Sin embargo cabe tener en cuenta las siguientes consideraciones a la hora de hacer la comparación:
+
+(1) Si bien la *AUC* es mayor, la curva no se ubica consistentemente por encima de la curva del resto de los predictores --en particular, *GAMpred* se ve superado por OASIS y SAPSII en el primer tramo de la curva. 
+
+(2) Se cuenta con una sola estimación de *AUC* en test para cada indicador. La bondad de la comparación sería mejor si se realizara más de una partición de remuestro en el set de datos, lo que permitiría evaluar el poder predictivo con la media de múltiples estimaciones de *AUC* para cada predictor.
+
+(3) Para que la comparación sea válida sería necesario:
+- Predecir mortalidad con *GAMpred* en pacientes de otros hospitales en otros momentos del tiempo, ya que los tres scores de severidad no fueron ajustados con datos del Beth Israel Deaconess Medical Center, mientras que *GAMpred*, sí.
+
+- Incluir en la validación las etapas de preprocesamiento descritas en la sección \@ref(prep) --por ejemplo, la imputación de faltantes con *median polish* debería realizarse con los datos de test únicamente.
+
+### Stacking
+
+En la Figura \@ref(fig:stack-corplot) presentamos el correlograma de Pearson de las variables incluidas en la regresión logística *stacked* ajustada con los registros de test: el indicador de atipicidad AE en escala logarítmica (outl_auto_log), el predictor *GAMpred* (pred_gam) y los tres scores estándar de severidad (oasis, sapsii y sofa).
+
+```{r stack-corplot, out.width='70%', fig.cap="Correlograma de los predictores en la regresión logística"}
+knitr::include_graphics("../output/plots/stacked_corplot.png")
+```
+
+Ningún par de regresores presenta una correlación bivariada de Pearson que se pueda considerar como muy alta, lo cual indica que todos captan factores de mortalidad relativamente distintos y que por podemos asumir la ausencia de colinealidad --al menos en un sentido bivariado-- en la regresión logística.
+
+Con el fin de aumentar el grado de confianza en la inferencia que hacemos de la regresión, ajustamos el modelo en 500 sets de bootstrap usando como base el set de test; computamos la media y el desvío de los coeficientes estimados, así como también el promedio de los p-valores. 
+
+```{r stack-boot}
+tab_stack = readRDS("output/tables/boot_stacked_logistic_test.rds")
+tab_stack %>%
+  mutate_if(is.numeric, function(x) round(x,5)) %>%
+  knitr::kable(caption="Resultados de regresión logística (bootstrap de 500 repeticiones)",booktabs=T) %>%
+  kable_styling(font_size=10)
+```
+
+Como se indica en el Cuadro \@ref(tab:stack-boot), *predGAM* es consistentemente el predictor con más importancia para la predicción de mortalidad, seguido por OASIS. Esto es razonable porque, si bien *predGAM* no fue ajustado con los datos de test, fue ajustado con datos del mismo hospital --de esta manera, es más que razonable que capte mejor las características del proceso generador de datos que los indicadores estándar.
+
+Por su parte, el indicador de atipicidad AE no presenta un aporte significativo una vez que se consideran los predictores propios de mortalidad (*predGAM* y los tres scores estándar).  
+
+# Referencias
