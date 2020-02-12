@@ -23,6 +23,7 @@ paq_proj <- c(
               ,"rsample"
               ,"yardstick"
               ,"GGally"
+              ,"pdftools"
               )
 
 # no tocar ----------------------------------------------------------------

@@ -1,0 +1,31 @@
+---
+title: |
+  \LARGE Universidad de Buenos Aires  
+  \vspace{0.5cm}
+  ![](img/uba-logo.png){width=1.2in}  
+  \vspace{0.25cm}
+  \Large Facultad de Ciencias Exactas y Naturales  
+  \Large Maestría en Explotación de Datos y Descubrimiento del Conocimiento  
+subtitle: | 
+  \vspace{2cm}
+  \LARGE Trabajo de Especialización  
+  \vspace{0.25cm}
+  \huge Detección de Anomalías y Predicción de Mortalidad en Terapia Intensiva  
+  \vspace{1cm}
+author: |
+  \LARGE Francisco Valentini  
+  \vspace{0.2cm}
+date: |
+  \Large Noviembre de 2019  
+  \vspace{1cm}
+  \Large Supervisor:  
+  \Large Marcelo Soria  
+lang: es
+output:
+  bookdown::pdf_document2:
+    toc: false
+    number_sections: false
+---
+
+\pagenumbering{gobble}
+\newpage  
